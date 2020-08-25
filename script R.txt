@@ -1,0 +1,690 @@
+rm(list=ls(all=TRUE))
+
+setwd("YOUR DIRECTORY")
+
+library(dagitty)
+library(mboost)
+library(bnlearn)
+library(MASS)
+
+nnodes=50
+prob=2/(nnodes-1)
+nsamples=1000
+boot=100000
+desiredboot=500
+maxbags=500
+midbags=50
+melancon=F
+testdensity=F
+
+dagset=list()
+simset=list()
+effect=list()
+reffect=list()
+aeffect=list()
+beffect=list()
+leffect=list()
+ueffect=list()
+bueffect=list()
+density=list()
+midbueffect=list()
+c=0
+if (melancon) {nnodes=25;maxbags=250;midbags=25;nsamples=1000}
+if (testdensity) {melancon=F;nnodes=25;maxbags=250;midbags=25;nsamples=1000}
+for (i in 1:boot)
+{
+	if (c==desiredboot) (break)
+	isthereadj=F
+	while (!isthereadj)
+	{
+		if (melancon)
+		{
+			#bn=random.graph(paste("x",1:nnodes,sep=""), method = "melancon", max.in.degree=ceiling(log(nnodes)))
+			bn=random.graph(paste("x",1:nnodes,sep=""), method = "melancon")
+			dotbn=paste("dag {",paste(arcs(bn)[,1],"->",arcs(bn)[,2],collapse="; "),"}")
+			if (dotbn!="dag {  ->  }") 
+			{
+				randomdag=dagitty(dotbn)	
+				query=sample(names(randomdag),1)
+				outcome=sample(setdiff(names(randomdag),query),1)
+				adjset=adjustmentSets(randomdag,query,outcome)
+				isthereadj=ifelse(length(unlist(adjset))>0,T,F)
+			}
+		}
+		if (!melancon)
+		{	
+			if (testdensity) {prob=sample(c(2/(nnodes-1),0.33),1)} #c(0.01,0.05,0.1,0.25,0.5,0.75)
+			randomdag=dagitty(randomDAG(nnodes,prob),layout=F)
+			query=sample(names(randomdag),1)
+			outcome=sample(setdiff(names(randomdag),query),1)
+			adjset=adjustmentSets(randomdag,query,outcome)
+			isthereadj=ifelse(length(unlist(adjset))>0,T,F)
+		}
+	}
+	if (isthereadj)
+	{
+		isSim=F
+		while(!isSim)
+		{
+			fl=T
+			if (melancon) {fl=F}
+			simdata=tryCatch(simulateSEM(randomdag,N=nsamples,standardized=fl),error=function(e) NULL)
+			if (!is.null(simdata)) {isSim=T}
+		}
+		if (!is.null(simdata))
+		{
+			c=c+1
+			exposures(randomdag)=query
+			outcomes(randomdag)=outcome
+			dagset[[c]]=randomdag
+			if (testdensity) {density[[c]]=prob}
+			#simset[[c]]=simdata
+			rform=as.formula(paste(outcome,"~",query))
+			aform=as.formula(paste(paste(outcome,"~",query),paste(" +",unlist(adjset[1]),collapse="")))
+			reffect[[c]]=glm(rform,data=simdata)$coef[2]
+			aeffect[[c]]=glm(aform,data=simdata)$coef[2]
+			gm=glmboost(as.formula(paste(outcome,"~.")),data=simdata)
+			lset=unique(c(query,names(coef(gm))[-1]))
+			lform=as.formula(paste(outcome,"~",paste(lset,collapse=" + ")))
+			ms=glm(lform,data=simdata)
+			if (length(which(query==names(coef(gm))[-1]))==0)
+			{
+				ms=stepAIC(ms,scope=list(lower=paste("~",query,sep="")),direction="both",trace=F)
+			}
+			leffect[[c]]=ms$coef[2]
+			be=NULL
+			bue=NULL
+			for (j in 1:maxbags)
+			{
+				#METHOD1
+				indices=NULL
+				baggedvertices=c(query,outcome)
+				shuf=sample(1:length(edges(randomdag)$v))
+				for (k in shuf)
+				{
+					if (edges(randomdag)$v[k]==query | edges(randomdag)$w[k]==query)
+					{
+						indices=c(indices,k)
+						baggedvertices=c(baggedvertices,as.character(edges(randomdag)$v[k]),as.character(edges(randomdag)$w[k]))
+						indices=unique(indices)
+						baggedvertices=unique(baggedvertices)
+						break
+					}
+				}
+				shuf=sample(c(1:length(edges(randomdag)$v))[-indices])
+				for (k in shuf)
+				{
+					if (edges(randomdag)$v[k]==outcome | edges(randomdag)$w[k]==outcome)
+					{
+						indices=c(indices,k)
+						baggedvertices=c(baggedvertices,as.character(edges(randomdag)$v[k]),as.character(edges(randomdag)$w[k]))
+						indices=unique(indices)
+						baggedvertices=unique(baggedvertices)
+						break
+					}
+				}
+				shuf=sample(c(1:length(edges(randomdag)$v))[-indices])
+				for (k in shuf)
+				{
+					if (edges(randomdag)$v[k]==query | edges(randomdag)$w[k]==query | edges(randomdag)$v[k]==outcome | edges(randomdag)$w[k]==outcome)
+					{
+						indices=c(indices,k)
+						baggedvertices=c(baggedvertices,as.character(edges(randomdag)$v[k]),as.character(edges(randomdag)$w[k]))
+						indices=unique(indices)
+						baggedvertices=unique(baggedvertices)
+					}
+					if (length(baggedvertices)>sqrt(nnodes)) break;
+				}
+				shuf=sample(c(1:length(edges(randomdag)$v))[-indices])
+				for (k in shuf)
+				{
+					indices=c(indices,k)
+					baggedvertices=c(baggedvertices,as.character(edges(randomdag)$v[k]),as.character(edges(randomdag)$w[k]))
+					indices=unique(indices)
+					baggedvertices=unique(baggedvertices)
+					if (length(baggedvertices)>sqrt(nnodes)) break;
+				}
+				baggededges=edges(randomdag)[indices,]
+				bgs=paste(query,outcome,paste(baggededges$v,baggededges$e,baggededges$w,collapse="; "),sep=";")
+				baggedgraph=dagitty(paste("dag {",bgs,"}"))
+				#METHOD2
+				#baggedvertices=c(query,outcome,sample(setdiff(setdiff(names(randomdag),query),outcome),sqrt(nnodes)))
+				#indices=NULL
+				#for (k in 1:length(edges(randomdag)$v))
+				#{
+				#	if (length(which(edges(randomdag)$v[k]==baggedvertices))>0 & length(which(edges(randomdag)$w[k]==baggedvertices))>0)
+				#	indices=c(indices,k)
+				#	indices=unique(indices)
+				#}
+				#baggededges=edges(randomdag)[indices,]
+				#bgs=paste(query,outcome,paste(baggededges$v,baggededges$e,baggededges$w,collapse="; "),sep=";")
+				#baggedgraph=dagitty(paste("dag {",bgs,"}"))
+				#METHOD3
+				#baggedvertices=c(query,outcome,sample(setdiff(setdiff(names(randomdag),query),outcome),sqrt(nnodes)))
+				#pt=NULL; for (q in baggedvertices[-length(baggedvertices)])for (w in baggedvertices[-1]) {pt=c(pt,(paths(randomdag,q,w)$paths))};pt=unique(pt)
+				#baggedgraph=dagitty(paste("dag {",paste(pt,";",collapse=""),"}"),layout=T)
+				#METHOD4
+				#baggedvertices=c(query,outcome,sample(setdiff(setdiff(names(randomdag),query),outcome),sqrt(nnodes)))
+				#baggedgraph=ancestorGraph(randomdag,baggedvertices)
+				
+				exposures(baggedgraph)=query
+				outcomes(baggedgraph)=outcome
+				baggedadjset=NULL
+				if (length(exposures(baggedgraph))>0 & length(outcomes(baggedgraph))>0)
+					baggedadjset=adjustmentSets(baggedgraph,query,outcome)
+				if (length(unlist(baggedadjset))!=0)
+				{
+					bform=as.formula(paste(paste(outcome,"~",query),paste(" +",unlist(baggedadjset[1]),collapse="")))
+					be=c(be,glm(bform,data=simdata)$coef[2])
+				}
+				bn=hc(simdata[,baggedvertices])
+				bgs=paste(query,outcome,paste(arcs(bn)[,1],"->",arcs(bn)[,2],collapse="; "),sep=";")
+				dotbn=paste("dag {",bgs,"}")
+				if (dotbn!="dag {  ->  }") 
+				{
+					learnedgraph=dagitty(dotbn)
+					exposures(learnedgraph)=query
+					outcomes(learnedgraph)=outcome
+					if (length(exposures(learnedgraph))>0 & length(outcomes(learnedgraph))>0)
+					{
+						learnedadjset=adjustmentSets(learnedgraph,query,outcome)
+						if (length(unlist(learnedadjset))>0)
+						{
+							nform=as.formula(paste(paste(outcome,"~",query),paste(" +",unlist(learnedadjset[1]),collapse="")))
+							bue=c(bue,glm(nform,data=simdata)$coef[2])
+						}
+					}
+				}
+				if (j==midbags) {midbueffect[[c]]=ifelse(is.null(bue),reffect[[c]],mean(bue))}
+			}
+			beffect[[c]]=ifelse(is.null(be),reffect[[c]],mean(be))
+			bueffect[[c]]=ifelse(is.null(bue),reffect[[c]],mean(bue))
+			bn=hc(simdata)
+			bgs=paste(query,outcome,paste(arcs(bn)[,1],"->",arcs(bn)[,2],collapse="; "),sep=";")
+			dotbn=paste("dag {",bgs,"}")
+			if (dotbn!="dag {  ->  }") 
+			{
+				learnedgraph=dagitty(dotbn)
+				exposures(learnedgraph)=query
+				outcomes(learnedgraph)=outcome
+				if (length(exposures(learnedgraph))>0 & length(outcomes(learnedgraph))>0)
+				{
+					learnedadjset=adjustmentSets(learnedgraph,query,outcome)
+					if (length(unlist(learnedadjset))>0)
+						{
+							nform=as.formula(paste(paste(outcome,"~",query),paste(" +",unlist(learnedadjset[1]),collapse="")))
+							ueffect[[c]]=glm(nform,data=simdata)$coef[2]
+						}
+					else {ueffect[[c]]=reffect[[c]]}
+				}
+				if (length(exposures(learnedgraph))==0 | length(outcomes(learnedgraph))==0) {ueffect[[c]]=reffect[[c]]}	
+			}
+			if (dotbn=="dag {  ->  }") {ueffect[[c]]=reffect[[c]]}
+		}
+	}
+	if (i%%50==0) cat("iter =",i," found =",c,"\r\n")
+	if (c>0 & c%%5==0)
+	{
+		if (!melancon) save.image("simul_sparse.Rdata")
+		if (melancon) save.image("simul_dense.Rdata")
+		raw_crude=abs(unlist(aeffect)-unlist(reffect))
+		bagged_true_causal=abs(unlist(aeffect)-unlist(beffect))
+		boosted_lr=abs(unlist(aeffect)-unlist(leffect))
+		full_struct_learn=abs(unlist(aeffect)-unlist(ueffect))
+		bagged_struct_learn_mid=abs(unlist(aeffect)-unlist(midbueffect))
+		bagged_struct_learn_max=abs(unlist(aeffect)-unlist(bueffect))
+		if (!testdensity) {boxplot(cbind(raw_crude,bagged_true_causal,boosted_lr,full_struct_learn,bagged_struct_learn_mid,bagged_struct_learn_max))}
+		if (testdensity)
+			{
+				ylimm=c(0,0.4)
+				par(mfcol=c(3,2))
+				boxplot(raw_crude~unlist(density),ylim=ylimm)
+				boxplot(bagged_true_causal~unlist(density),ylim=ylimm)
+				boxplot(boosted_lr~unlist(density),ylim=ylimm)
+				boxplot(full_struct_learn~unlist(density),ylim=ylimm)
+				boxplot(bagged_struct_learn_mid~unlist(density),ylim=ylimm)
+				boxplot(bagged_struct_learn_max~unlist(density),ylim=ylimm)
+			}
+	}
+}
+
+
+############## MAKING GRAPHS ################
+rm(list=ls(all=TRUE))
+setwd("C:/Users/m.prosperi/Downloads/BAGGED CAUSAL NETS")
+
+library(ggplot2)
+library(gridExtra)
+library(tidyr)
+library(dplyr)
+
+load('simul_sparse.RData')
+raw_crude=abs(unlist(aeffect)-unlist(reffect))
+bagged_true_causal=abs(unlist(aeffect)-unlist(beffect))
+boosted_lr=abs(unlist(aeffect)-unlist(leffect))
+full_struct_learn=abs(unlist(aeffect)-unlist(ueffect))
+bagged_struct_learn_mid=abs(unlist(aeffect)-unlist(midbueffect))
+bagged_struct_learn_max=abs(unlist(aeffect)-unlist(bueffect))
+datar=cbind(raw_crude,bagged_true_causal,boosted_lr,full_struct_learn,bagged_struct_learn_mid,bagged_struct_learn_max)
+datar=as.data.frame(datar)
+type=c(rep("Crude",length(raw_crude)),rep("BRCN prior know",length(bagged_true_causal)),rep("Boosted LR",length(boosted_lr)),rep("Full DAG learn",length(full_struct_learn)),rep("BRCN (few)",length(bagged_struct_learn_mid)),rep("BRCN (many)",length(bagged_struct_learn_max)))
+value=c(raw_crude,bagged_true_causal,boosted_lr,full_struct_learn,bagged_struct_learn_mid,bagged_struct_learn_max)
+data_wide=cbind(as.data.frame(type),value)
+data_wide=as.data.frame(data_wide)
+names(data_wide)=c("type","absolute_deviation_from_true_effect")
+upp=quantile(data_wide$absolute_deviation_from_true_effect,0.925)
+#upp=0.2
+data_wide_sparse=data_wide
+g1=ggplot(data_wide, aes(x=type, y=absolute_deviation_from_true_effect)) + coord_cartesian(ylim=c(0,upp)) + geom_jitter(shape=10, position=position_jitter(0.25),col="lightgrey") + geom_boxplot(notch=T, fill="lightblue", color="black",outlier.colour="darkgrey") + stat_summary(fun=mean, geom="point", shape=4, size=3) + theme(axis.title.x = element_blank(), legend.position="none",axis.text=element_text(size=12),axis.title=element_text(size=12)) +labs(y="Absolute deviation from true effect") + ggtitle("(A)          Sparse networks")
+
+load('simul_dense.RData')
+raw_crude=abs(unlist(aeffect)-unlist(reffect))
+bagged_true_causal=abs(unlist(aeffect)-unlist(beffect))
+boosted_lr=abs(unlist(aeffect)-unlist(leffect))
+full_struct_learn=abs(unlist(aeffect)-unlist(ueffect))
+bagged_struct_learn_mid=abs(unlist(aeffect)-unlist(midbueffect))
+bagged_struct_learn_max=abs(unlist(aeffect)-unlist(bueffect))
+datar=cbind(raw_crude,bagged_true_causal,boosted_lr,full_struct_learn,bagged_struct_learn_mid,bagged_struct_learn_max)
+datar=as.data.frame(datar)
+type=c(rep("Crude",length(raw_crude)),rep("BRCN prior know",length(bagged_true_causal)),rep("Boosted LR",length(boosted_lr)),rep("Full DAG learn",length(full_struct_learn)),rep("BRCN (few)",length(bagged_struct_learn_mid)),rep("BRCN (many)",length(bagged_struct_learn_max)))
+value=c(raw_crude,bagged_true_causal,boosted_lr,full_struct_learn,bagged_struct_learn_mid,bagged_struct_learn_max)
+data_wide=cbind(as.data.frame(type),value)
+data_wide=as.data.frame(data_wide)
+names(data_wide)=c("type","absolute_deviation_from_true_effect")
+upp=quantile(data_wide$absolute_deviation_from_true_effect,0.925)
+#upp=0.2
+data_wide_dense=data_wide
+g2=ggplot(data_wide, aes(x=type, y=absolute_deviation_from_true_effect)) + coord_cartesian(ylim=c(0,upp)) + geom_jitter(shape=10, position=position_jitter(0.25),col="lightgrey") + geom_boxplot(notch=T, fill="lightblue", color="black",outlier.colour="darkgrey") + stat_summary(fun=mean, geom="point", shape=4, size=3) + theme(axis.title.x = element_blank(), legend.position="none",axis.text=element_text(size=12),axis.title=element_text(size=12)) +labs(y="Absolute deviation from true effect") + ggtitle("(B)          Dense networks")
+
+grid.arrange(g1, g2, nrow=1)
+
+
+###############MANUAL DAG###############
+results=NULL
+nsamples=1000
+bagiters=250
+for (b in 1:1000)
+{
+#type=sample(c("complex","collid","coll_conf","noisy"),1)
+#md_co=dagitty("dag{x1->x3;x2->x3;x4->x1;x4->x2;x4->x3;x3->x5;x5->x6;x3->x7;x3->x8;x4->x24;x4<-x28;x1->x26<-x2;x1->x27<-x2;x29->x28;x30->x24}",layout=T)
+#md_cc=dagitty("dag{x1->x3;x2->x3;x4->x1;x4->x2;x4->x3;x3->x5;x5->x6;x3->x7;x3->x8;x4->x24;x4<-x28;x1->x26<-x2;x1->x27<-x2;x29->x28;x30->x24;x9->x1;x9->x2;x10->x1;x10->x2}",layout=T)
+#md_cm=dagitty("dag{x1->x3;x2->x3;x4->x1;x4->x2;x4->x3;x3->x5;x5->x6;x3->x7;x3->x8;x4->x24;x4<-x28;x1->x26<-x2;x1->x27<-x2;x29->x28;x30->x24;x9->x1;x9->x2;x10->x1;x10->x2;x11->x1;x12<-x2;x1->x25->x2;x1<-x14->x13<-x15->x2}",layout=T)
+#md_no=dagitty("dag{x1->x3;x2->x3;x4->x1;x4->x2;x4->x3;x3->x5;x5->x6;x3->x7;x3->x8;x4->x24;x4<-x28;x1->x26<-x2;x1->x27<-x2;x29->x28;x30->x24;x9->x1;x9->x2;x10->x1;x10->x2;x11->x1;x12<-x2;x1->x25->x2;x1<-x14->x13<-x15->x2;x16->x17<-x18;x19->x20->x21;x22->x23}",layout=T)
+#if (type=="collid") {md=md_co}
+#if (type=="coll_conf") {md=md_cc}
+#if (type=="complex") {md=md_cm}
+#if (type=="noisy") {md=md_no}
+type=sample(c("collid","coll_conf","confou"),1)
+nnodes=20
+isthereadj=F
+while (!isthereadj)
+{
+	nodes=paste("x",1:nnodes,sep="")
+	bn=random.graph(nodes, method = "melancon", max.in.degree=ceiling(log(nnodes)))
+	#bn=random.graph(nodes, method = "melancon")
+	bgs=paste(arcs(bn)[,1],"->",arcs(bn)[,2],collapse="; ")
+	adds=""
+	if (type=="collid")
+	{
+		for (z in 1:round(nnodes/4,0))
+		{adds=paste(adds,"x1->","c",z,"<-x2;",sep="")}
+	}
+	if (type=="confou")
+	{
+		for (z in 1:round(nnodes/4,0))
+		{adds=paste(adds,"x1<-","c",z,"->x2;",sep="")}
+	}
+	if (type=="coll_conf")
+	{
+		for (z in 1:round(nnodes/4,0))
+		{adds=paste(adds,"x1->","col",z,"<-x2;",sep="")}
+		for (z in 1:round(nnodes/4,0))
+		{adds=paste(adds,"x1<-","con",z,"->x2;",sep="")}
+	}
+	bgs=paste(bgs,adds,sep=";")
+	dotbn=paste("dag {",bgs,"}")
+	if (dotbn!="dag {  ->  }" & length(unique(c(arcs(bn)[,1],arcs(bn)[,2])))==length(nodes)) 
+	{
+		randomdag=dagitty(dotbn)	
+		exposures(randomdag)="x1"
+		outcomes(randomdag)="x2"
+		adjset=adjustmentSets(randomdag)
+		isthereadj=ifelse(length(unlist(adjset))>0,T,F)
+	}
+}
+md=randomdag
+exposures(md)="x1"
+outcomes(md)="x2"
+adj=adjustmentSets(md)
+isSim=F
+while(!isSim)
+{
+	data=tryCatch(simulateSEM(md,N=nsamples,standardized=T),error=function(e) NULL)
+	if (!is.null(data)) {isSim=T}
+}
+gm=glmboost(as.formula(paste(outcomes(md),"~.")),data=data)
+lset=unique(c(exposures(md),names(coef(gm))[-1]))
+lform=as.formula(paste(outcomes(md),"~",paste(lset,collapse=" + ")))
+ms=glm(lform,data=data)
+if (length(which(exposures(md)==names(coef(gm))[-1]))==0)
+{
+	ms=stepAIC(ms,scope=list(lower=paste("~",exposures(md),sep="")),direction="both",trace=F)
+}
+be=NULL
+bue=NULL
+for (j in 1:bagiters)
+{
+	query=exposures(md); outcome=outcomes(md); randomdag=md; nnodes=length(names(md)); simdata=data
+				#METHOD1
+				indices=NULL
+				baggedvertices=c(query,outcome)
+				shuf=sample(1:length(edges(randomdag)$v))
+				for (k in shuf)
+				{
+					if (edges(randomdag)$v[k]==query | edges(randomdag)$w[k]==query)
+					{
+						indices=c(indices,k)
+						baggedvertices=c(baggedvertices,as.character(edges(randomdag)$v[k]),as.character(edges(randomdag)$w[k]))
+						indices=unique(indices)
+						baggedvertices=unique(baggedvertices)
+						break
+					}
+				}
+				shuf=sample(c(1:length(edges(randomdag)$v))[-indices])
+				for (k in shuf)
+				{
+					if (edges(randomdag)$v[k]==outcome | edges(randomdag)$w[k]==outcome)
+					{
+						indices=c(indices,k)
+						baggedvertices=c(baggedvertices,as.character(edges(randomdag)$v[k]),as.character(edges(randomdag)$w[k]))
+						indices=unique(indices)
+						baggedvertices=unique(baggedvertices)
+						break
+					}
+				}
+				shuf=sample(c(1:length(edges(randomdag)$v))[-indices])
+				for (k in shuf)
+				{
+					if (edges(randomdag)$v[k]==query | edges(randomdag)$w[k]==query | edges(randomdag)$v[k]==outcome | edges(randomdag)$w[k]==outcome)
+					{
+						indices=c(indices,k)
+						baggedvertices=c(baggedvertices,as.character(edges(randomdag)$v[k]),as.character(edges(randomdag)$w[k]))
+						indices=unique(indices)
+						baggedvertices=unique(baggedvertices)
+					}
+					if (length(baggedvertices)>sqrt(nnodes)) break;
+				}
+				shuf=sample(c(1:length(edges(randomdag)$v))[-indices])
+				for (k in shuf)
+				{
+					indices=c(indices,k)
+					baggedvertices=c(baggedvertices,as.character(edges(randomdag)$v[k]),as.character(edges(randomdag)$w[k]))
+					indices=unique(indices)
+					baggedvertices=unique(baggedvertices)
+					if (length(baggedvertices)>sqrt(nnodes)) break;
+				}
+				baggededges=edges(randomdag)[indices,]
+				bgs=paste(query,outcome,paste(baggededges$v,baggededges$e,baggededges$w,collapse="; "),sep=";")
+				baggedgraph=dagitty(paste("dag {",bgs,"}"))
+				#METHOD2
+				#baggedvertices=c(query,outcome,sample(setdiff(setdiff(names(randomdag),query),outcome),sqrt(nnodes)))
+				#indices=NULL
+				#for (k in 1:length(edges(randomdag)$v))
+				#{
+				#	if (length(which(edges(randomdag)$v[k]==baggedvertices))>0 & length(which(edges(randomdag)$w[k]==baggedvertices))>0)
+				#	indices=c(indices,k)
+				#	indices=unique(indices)
+				#}
+				#baggededges=edges(randomdag)[indices,]
+				#bgs=paste(query,outcome,paste(baggededges$v,baggededges$e,baggededges$w,collapse="; "),sep=";")
+				#baggedgraph=dagitty(paste("dag {",bgs,"}"))
+				#METHOD3
+				#baggedvertices=c(query,outcome,sample(setdiff(setdiff(names(randomdag),query),outcome),sqrt(nnodes)))
+				#pt=NULL; for (q in baggedvertices[-length(baggedvertices)])for (w in baggedvertices[-1]) {pt=c(pt,(paths(randomdag,q,w)$paths))};pt=unique(pt)
+				#baggedgraph=dagitty(paste("dag {",paste(pt,";",collapse=""),"}"),layout=T)
+				#METHOD4
+				#baggedvertices=c(query,outcome,sample(setdiff(setdiff(names(randomdag),query),outcome),sqrt(nnodes)))
+				#baggedgraph=ancestorGraph(randomdag,baggedvertices)
+	exposures(baggedgraph)=query
+	outcomes(baggedgraph)=outcome
+	baggedadjset=NULL
+	if (length(exposures(baggedgraph))>0 & length(outcomes(baggedgraph))>0)
+		baggedadjset=adjustmentSets(baggedgraph,query,outcome)
+	if (length(unlist(baggedadjset))!=0)
+	{
+		bform=as.formula(paste(paste(outcome,"~",query),paste(" +",unlist(baggedadjset[1]),collapse="")))
+		be=c(be,glm(bform,data=simdata)$coef[2])
+	}
+	bn=hc(simdata[,baggedvertices])
+	bgs=paste(query,outcome,paste(arcs(bn)[,1],"->",arcs(bn)[,2],collapse="; "),sep=";")
+	dotbn=paste("dag {",bgs,"}")
+	if (dotbn!="dag {  ->  }" & dotbn!="dag { x1;x2; ->  }") 
+	{
+		learnedgraph=dagitty(dotbn)
+		exposures(learnedgraph)=query
+		outcomes(learnedgraph)=outcome
+		if (length(exposures(learnedgraph))>0 & length(outcomes(learnedgraph))>0)
+		{
+			learnedadjset=adjustmentSets(learnedgraph,query,outcome)
+			if (length(unlist(learnedadjset))>0)
+			{
+				nform=as.formula(paste(paste(outcome,"~",query),paste(" +",unlist(learnedadjset[1]),collapse="")))
+				bue=c(bue,glm(nform,data=simdata)$coef[2])
+			}
+		}
+	}
+}
+crude=summary(glm(x2~x1,data=data))$coef[2,1]
+boosted_causal_true=ifelse(is.null(be),crude,mean(be))
+boosted_causal_learnt=ifelse(is.null(bue),crude,mean(bue))
+aform=as.formula(paste(paste(outcomes(md),"~",exposures(md)),paste(" +",unlist(adj[1]),collapse="")))	
+gac=summary(glm(aform,data=data))$coef[2,1]
+boosted_lr=summary(ms)$coef[2,1]
+				
+nomi=c("crude","boosted LR","RBCN","RCBN prior know")
+stime=c(abs(gac-crude),abs(gac-boosted_lr),abs(gac-boosted_causal_true),abs(gac-boosted_causal_learnt))
+stime=as.data.frame(stime)
+stime=cbind(as.data.frame(nomi),stime)
+type=rep(type,length(stime[,1]))
+stime=cbind(type,stime)
+results=rbind(results,stime)
+if (b%%25==0) {cat(b,"\r\n");boxplot(results$stime~results$nomi+results$type,col=2:5);save.image("manualNet.RData")}
+}
+results=as.data.frame(results)
+
+results1=results
+#results1=results[results$nomi!="b_ct",]
+#results1=droplevels(results1)
+par(mfcol=c(1,3))
+boxplot(results1$stime[results1$type=="confou"]~results1$nomi[results1$type=="confou"],ylim=c(0,0.5),cex.main=1.6,main="More confounders",cex.lab=1.5,cex.axis=1.5,ylab="Error on effect",notch=T,xlab="")
+boxplot(results1$stime[results1$type=="collid"]~results1$nomi[results1$type=="collid"],ylim=c(0,0.5),cex.main=1.6,main="More colliders",cex.lab=1.5,cex.axis=1.5,ylab="Error on effect",notch=T,xlab="")
+boxplot(results1$stime[results1$type=="coll_conf"]~results1$nomi[results1$type=="coll_conf"],ylim=c(0,0.5),cex.main=1.6,main="Balanced colliders and confounders",cex.lab=1.5,cex.axis=1.5,ylab="Error on effect",notch=T,xlab="")
+
+save.image("manualNet.RData")
+
+
+
+########DRAWING COMPLEX CAUSAL NETWORK AS EXAMPLE##########
+md_no=dagitty("dag{x1->x3;x2->x3;x4->x1;x4->x2;x4->x3;x3->x5;x5->x6;x3->x7;x3->x8;x4->x24;x4<-x28;x1->x26<-x2;x1->x27<-x2;x29->x28;x30->x24;x9->x1;x9->x2;x10->x1;x10->x2;x11->x1;x12<-x2;x1->x25->x2;x1<-x14->x13<-x15->x2;x16->x17<-x18;x19->x20->x21;x22->x23}",layout=T)
+exposures(md_no)="x1"
+outcomes(md_no)="x2"
+bn=empty.graph(names(md_no))
+arcset=matrix(unlist(dagitty::edges(md_no)[,1:2]),ncol=2,dimnames = list(NULL, c("from", "to")))
+arcs(bn)=arcset
+library(Rgraphviz)
+#dots, neato, twopi, circo and fdp
+gR=graphviz.plot(bn,layout="dot",highlight=list(nodes=unlist(adjustmentSets(md_no)),col=3,textCol="white",fill=3))
+node.attrs = nodeRenderInfo(gR)
+node.attrs$textCol["x2"] = "white"
+node.attrs$fill["x2"] = "blue"
+node.attrs$col["x2"] = "blue"
+node.attrs$textCol["x1"] = "white"
+node.attrs$fill["x1"] = "black"
+node.attrs$col["x1"] = "black"
+node.attrs$textCol["x3"] = "white"
+node.attrs$fill["x3"] = "red"
+node.attrs$col["x3"] = "red"
+node.attrs$textCol["x26"] = "white"
+node.attrs$fill["x26"] = "red"
+node.attrs$col["x26"] = "red"
+node.attrs$textCol["x27"] = "white"
+node.attrs$fill["x27"] = "red"
+node.attrs$col["x27"] = "red"
+node.attrs$textCol["x25"] = "white"
+node.attrs$fill["x25"] = "grey"
+node.attrs$col["x25"] = "grey"
+node.attrs$textCol[c("x5","x7","x8","x6")] = "white"
+node.attrs$fill[c("x5","x7","x8","x6")] = "red"
+node.attrs$col[c("x5","x7","x8","x6")] = "red"
+node.attrs$textCol[c("x15","x14","x13")] = "white"
+node.attrs$fill[c("x15","x14","x13")] = "orange"
+node.attrs$col[c("x15","x14","x13")] = "orange"
+nodeRenderInfo(gR) = node.attrs
+
+renderGraph(gR)
+
+#arc.attrs = edgeRenderInfo(gR)
+#arc.attrs$col[c("C~G", "C~H", "C~I")] = "tomato"
+#arc.attrs$lty[c("C~G", "C~H", "C~I")] = "twodash"
+#arc.attrs$arrowhead[c("C~G", "C~H", "C~I")] = "diamond"
+#edgeRenderInfo(gR) = arc.attrs
+#renderGraph(gR)
+
+#library(ggdag)
+#exposures(md_n)="x1"
+#outcomes(md_n)="x2"
+#tidy_dag <- tidy_dagitty(md_n)
+#ggdag(tidy_dag) + theme_dag()
+#ggdag_adjustment_set(tidy_dag, node_size = 10, edge_type = "diagonal") + theme(legend.position = "bottom")
+
+###########################################
+
+
+############ TIME LEARNING DAGs/ BAGGED DAGS #################
+
+if(TRUE)
+{
+time_full_bn_vec=NULL
+time_bagged_bn_100=NULL
+time_bagged_bn_200=NULL
+time_bagged_bn_500=NULL
+time_bagged_bn_1000=NULL
+sizes=seq(50,250,by=10)
+for (i in sizes)
+{
+	nnodes=i
+	randomdag=dagitty(randomDAG(nnodes,2/(nnodes-1)),layout=F)
+	simdata=simulateSEM(randomdag,N=nsamples,standardized=F)
+	time_full_bn=Sys.time()
+		bn=hc(simdata)
+	time_full_bn=Sys.time()-time_full_bn
+	time_full_bn_vec=c(time_full_bn_vec,time_full_bn)
+	time_bagged_bn=Sys.time()
+		for (j in 1:100)
+			bn=hc(simdata[,sample(1:nnodes,sqrt(nnodes))])
+	time_bagged_bn=Sys.time()-time_bagged_bn
+	time_bagged_bn_100=c(time_bagged_bn_100,time_bagged_bn)
+	time_bagged_bn=Sys.time()
+		for (j in 1:200)
+			bn=hc(simdata[,sample(1:nnodes,sqrt(nnodes))])
+	time_bagged_bn=Sys.time()-time_bagged_bn
+	time_bagged_bn_200=c(time_bagged_bn_200,time_bagged_bn)
+	time_bagged_bn=Sys.time()
+		for (j in 1:500)
+			bn=hc(simdata[,sample(1:nnodes,sqrt(nnodes))])
+	time_bagged_bn=Sys.time()-time_bagged_bn
+	time_bagged_bn_500=c(time_bagged_bn_500,time_bagged_bn)
+	time_bagged_bn=Sys.time()
+		for (j in 1:1000)
+			bn=hc(simdata[,sample(1:nnodes,sqrt(nnodes))])
+	time_bagged_bn=Sys.time()-time_bagged_bn
+	time_bagged_bn_1000=c(time_bagged_bn_1000,time_bagged_bn)
+	
+	if (i%%10==0) cat(i,"\r\n")
+}
+
+windows()
+plot(sizes,time_full_bn_vec,xlab="node size",ylab="time (s)",cex=1.2,cex.axis=1.2,cex.lab=1.2)
+points(sizes,time_bagged_bn_100,col=2,cex=1.2)
+points(sizes,time_bagged_bn_200,col=3,cex=1.2)
+points(sizes,time_bagged_bn_500,col=4,cex=1.2)
+points(sizes,time_bagged_bn_1000,col=5,cex=1.2)
+lines(lowess(sizes,time_full_bn_vec),lwd=2,lty=1)
+lines(lowess(sizes,time_bagged_bn_100),col=2,lwd=3,lty=2)
+lines(lowess(sizes,time_bagged_bn_200),col=3,lwd=3,lty=3)
+lines(lowess(sizes,time_bagged_bn_500),col=4,lwd=3,lty=4)
+lines(lowess(sizes,time_bagged_bn_1000),col=5,lwd=3,lty=5)
+legend("topleft",c("full structure learning","100 bagging iterations","200 bagging iterations","500 bagging iterations","1000 bagging iterations"),col=1:6,lty=1:5,lwd=3,cex=1.2)
+}
+
+
+
+############NUMBER OF NODES#################
+nns=3:133
+nes=NULL
+nem=NULL
+neml=NULL
+for (i in nns)
+{
+	bn=random.graph(paste("x",1:i,sep=""), method = "melancon" )
+	nem=c(nem,length(arcs(bn))/2)
+	bn=random.graph(paste("x",1:i,sep=""), method = "melancon", max.in.degree=ceiling(log(i)))
+	neml=c(neml,length(arcs(bn))/2)
+	bn=dagitty(randomDAG(i,2/(i-1)),layout=F)
+	nes=c(nes,dim(edges(bn))[1])
+	if (i%%15==0) cat("iter =",i,"\r\n")
+}
+plot(nns,nes,col=3,xlim=c(0,max(nns)),ylim=c(0,max(nes,nem,neml)))
+points(nns,nem,col=4)
+points(nns,neml,col=5)
+nns2=nns^2
+nns3=nns^3
+nns4=nns^4
+lines(predict(glm(nes~nns)),col=3)
+lines(predict(glm(nem~nns2)),col=4)
+mml1=glm(neml~nns)
+mml2=glm(neml~nns2)
+mml3=glm(neml~asinh(nns))
+mml4=glm(neml~exp(nns))
+mml5=glm(neml~nns4+nns3+nns2+nns+sqrt(nns)+log(nns)+asinh(nns)+exp(nns))
+############NUMBER OF NODES#################
+
+
+
+
+
+############## FIGURE GAC ####################
+
+rm(list=ls(all=TRUE))
+
+library(bnlearn)
+library(dagitty)
+library(ggdag)
+
+nnodes=5
+isthereadj=F
+while (!isthereadj)
+{
+	nodes=paste("x",1:nnodes,sep="")
+	nodes[[length(nodes)+1]]="query"
+	nodes[[length(nodes)+1]]="outcome"
+	bn=random.graph(nodes, method = "melancon", max.in.degree=ceiling(log(nnodes)))
+	bn=random.graph(nodes, method = "melancon")
+	dotbn=paste("dag {",paste(arcs(bn)[,1],"->",arcs(bn)[,2],collapse="; "),"}")
+	if (dotbn!="dag {  ->  }" & length(unique(c(arcs(bn)[,1],arcs(bn)[,2])))==length(nodes)) 
+	{
+		randomdag=dagitty(dotbn)	
+		exposures(randomdag)="query"
+		outcomes(randomdag)="outcome"
+		adjset=adjustmentSets(randomdag)
+		if (length(adjset)==3)
+		{
+			isthereadj=ifelse(length(unlist(adjset))>4,T,F)
+		}
+	}
+}
+dag=randomdag
+
+tidy_dagitty(dag) %>% dag_adjustment_sets()
+
+ggdag_adjustment_set(dag, text_col="black", shadow=T, node_size=20, stylized=T, text_size=6)
